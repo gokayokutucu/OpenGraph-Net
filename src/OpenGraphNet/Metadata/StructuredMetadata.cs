@@ -101,7 +101,7 @@
                 throw new ArgumentNullException(nameof(propertyKey));
             }
 
-            var myKey = string.Concat(this.Namespace.Prefix, ":", this.Name);
+            var myKey = string.Concat(this.Namespace != null ? this.Namespace.Prefix + ":" : string.Empty, this.Name);
             return propertyKey.StartsWith(myKey, StringComparison.OrdinalIgnoreCase) && !string.Equals(propertyKey, myKey, StringComparison.InvariantCultureIgnoreCase);
         }
 

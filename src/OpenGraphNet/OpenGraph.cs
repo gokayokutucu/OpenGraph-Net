@@ -1,4 +1,6 @@
-﻿namespace OpenGraphNet
+﻿using System.Web;
+
+namespace OpenGraphNet
 {
     using System;
     using System.Collections.Generic;
@@ -19,10 +21,17 @@
     /// </summary>
     public class OpenGraph
     {
+        private static string[] _keyStrings = {"charset", "http-equiv", "itemprop" };
+
         /// <summary>
         /// The open graph data.
         /// </summary>
         private readonly StructuredMetadataDictionary internalOpenGraphData;
+
+        /// <summary>
+        /// The metadata data.
+        /// </summary>
+        private readonly StructuredMetadataDictionary internalMetadata;
 
         /// <summary>
         /// Prevents a default instance of the <see cref="OpenGraph" /> class from being created.
@@ -30,6 +39,7 @@
         private OpenGraph()
         {
             this.internalOpenGraphData = new StructuredMetadataDictionary();
+            this.internalMetadata = new StructuredMetadataDictionary();
             this.Namespaces = new Dictionary<string, OpenGraphNamespace>();
         }
 
@@ -39,7 +49,7 @@
         /// <value>
         /// The data.
         /// </value>
-        public IDictionary<string, IList<StructuredMetadata>> Metadata => new ReadOnlyDictionary<string, IList<StructuredMetadata>>(this.internalOpenGraphData);
+        public MetadataList Metadata => new MetadataList(this.internalMetadata, this.internalOpenGraphData);
 
         /// <summary>
         /// Gets the namespaces.
@@ -280,21 +290,35 @@
         /// Adds the meta element.
         /// </summary>
         /// <param name="element">The element.</param>
-        public void AddMetadata(StructuredMetadata element)
+        public void AddMetadata(StructuredMetadata element, bool isOpenGraph = false)
         {
             if (element == null)
             {
                 throw new ArgumentNullException(nameof(element));
             }
 
-            var key = string.Concat(element.Namespace.Prefix, ":", element.Name);
-            if (this.internalOpenGraphData.ContainsKey(key))
+            var key = string.Concat(element.Namespace != null ? element.Namespace.Prefix + ":" : string.Empty, element.Name);
+            if (isOpenGraph)
             {
-                this.internalOpenGraphData[key].Add(element);
+                if (this.internalOpenGraphData.ContainsKey(key))
+                {
+                    this.internalOpenGraphData[key].Add(element);
+                }
+                else
+                {
+                    this.internalOpenGraphData.Add(key, new List<StructuredMetadata> { element });
+                }
             }
             else
             {
-                this.internalOpenGraphData.Add(key, new List<StructuredMetadata> { element });
+                if (this.internalMetadata.ContainsKey(key))
+                {
+                    this.internalMetadata[key].Add(element);
+                }
+                else
+                {
+                    this.internalMetadata.Add(key, new List<StructuredMetadata> { element });
+                }
             }
         }
 
@@ -305,7 +329,7 @@
         /// <param name="name">The name.</param>
         /// <param name="value">The value.</param>
         /// <exception cref="InvalidOperationException">The prefix {prefix} does not exist in the NamespaceRegistry.</exception>
-        public void AddMetadata(string prefix, string name, string value)
+        public void AddMetadata(string prefix, string name, string value, bool isOpenGraph = false)
         {
             if (!NamespaceRegistry.Instance.Namespaces.ContainsKey(prefix))
             {
@@ -315,7 +339,7 @@
             var ns = NamespaceRegistry.Instance.Namespaces[prefix];
 
             var metadata = new StructuredMetadata(ns, name, value);
-            this.AddMetadata(metadata);
+            this.AddMetadata(metadata, isOpenGraph);
         }
 
         /// <summary>
@@ -373,6 +397,26 @@
         /// </summary>
         /// <param name="metaTag">The meta tag.</param>
         /// <returns>Returns the key stored from the meta tag.</returns>
+        private static string GetMetadataKey(HtmlNode metaTag)
+        {
+            if (metaTag.Attributes.Contains("property"))
+            {
+                return metaTag.Attributes["property"].Value;
+            }
+
+            if (metaTag.Attributes.Contains("name"))
+            {
+                return metaTag.Attributes["name"].Value;
+            }
+
+            return metaTag.Attributes.ReturnMatchedKey(_keyStrings).Name;
+        }
+
+        /// <summary>
+        /// Gets the open graph key.
+        /// </summary>
+        /// <param name="metaTag">The meta tag.</param>
+        /// <returns>Returns the key stored from the meta tag.</returns>
         private static string GetOpenGraphKey(HtmlNode metaTag)
         {
             if (metaTag.Attributes.Contains("property"))
@@ -390,9 +434,9 @@
         /// <returns>The prefix.</returns>
         private static string GetOpenGraphPrefix(HtmlNode metaTag)
         {
-            var value = metaTag.Attributes.Contains("property") ? metaTag.Attributes["property"].Value : metaTag.Attributes["name"].Value;
+            var value = metaTag.Attributes.Contains("property") ? metaTag.Attributes["property"]?.Value : metaTag.Attributes["name"]?.Value;
 
-            return value.Split(':')[0];
+            return !string.IsNullOrEmpty(value) && value.Contains(':', StringComparison.InvariantCulture) ? value.Split(':')[0] : null;
         }
 
         /// <summary>
@@ -410,6 +454,21 @@
 #else
             return value.Replace(string.Concat(prefix, ":"), string.Empty).ToLower(CultureInfo.InvariantCulture);
 #endif
+        }
+
+        /// <summary>
+        /// Gets the metadata value.
+        /// </summary>
+        /// <param name="metaTag">The meta tag.</param>
+        /// <returns>Returns the value from the meta tag.</returns>
+        private static string GetMetadataValue(HtmlNode metaTag)
+        {
+            if (!metaTag.Attributes.Contains("charset"))
+            {
+                return !metaTag.Attributes.Contains("content") ? string.Empty : metaTag.Attributes["content"].Value;
+            }
+
+            return metaTag.Attributes["charset"].Value;
         }
 
         /// <summary>
@@ -545,13 +604,50 @@
             ParseNamespaces(result, document);
 
             HtmlNodeCollection allMeta = document.DocumentNode.SelectNodes("//meta");
-
             var openGraphMetaTags = from meta in allMeta ?? new HtmlNodeCollection(null)
                                     where (meta.Attributes.Contains("property") && MatchesNamespacePredicate(meta.Attributes["property"].Value)) ||
-                                    (meta.Attributes.Contains("name") && MatchesNamespacePredicate(meta.Attributes["name"].Value))
+                                          (meta.Attributes.Contains("name") && MatchesNamespacePredicate(meta.Attributes["name"].Value))
                                     select meta;
 
             StructuredMetadata lastElement = null;
+            if (allMeta != null)
+            {
+                foreach (HtmlNode metaTag in allMeta)
+                {
+                    var prefix = GetOpenGraphPrefix(metaTag);
+                    SetNamespace(result, prefix);
+                    if (!string.IsNullOrEmpty(prefix) && !result.Namespaces.ContainsKey(prefix))
+                    {
+                        continue;
+                    }
+
+                    string value = GetMetadataValue(metaTag);
+                    string property = GetMetadataKey(metaTag);
+                    var cleanProperty = CleanOpenGraphKey(prefix, property);
+
+                    value = HtmlDecodeUrl(property, value);
+
+                    if (lastElement != null && lastElement.IsMyProperty(property))
+                    {
+                        lastElement.AddProperty(cleanProperty, value);
+                    }
+                    else if (IsChildOfExistingElement(result.internalMetadata, property))
+                    {
+                        var matchingElement =
+                            result.internalMetadata.First(kvp => kvp.Value.First().IsMyProperty(property));
+
+                        var element = matchingElement.Value.FirstOrDefault(e => !e.Properties.ContainsKey(cleanProperty));
+                        element?.AddProperty(cleanProperty, value);
+                    }
+                    else
+                    {
+
+                        lastElement = new StructuredMetadata(prefix != null ? result.Namespaces[prefix] : null, cleanProperty, value);
+                        result.AddMetadata(lastElement);
+                    }
+                }
+            }
+
             foreach (HtmlNode metaTag in openGraphMetaTags)
             {
                 var prefix = GetOpenGraphPrefix(metaTag);
@@ -582,7 +678,7 @@
                 else
                 {
                     lastElement = new StructuredMetadata(result.Namespaces[prefix], cleanProperty, value);
-                    result.AddMetadata(lastElement);
+                    result.AddMetadata(lastElement, true);
                 }
             }
 
@@ -655,15 +751,12 @@
         private static string HtmlDecodeUrl(string property, string value)
         {
             var urlPropertyPatterns = new[] { "image", "url^" };
-            foreach (var urlPropertyPattern in urlPropertyPatterns)
+            if (urlPropertyPatterns.Any(urlPropertyPattern => Regex.IsMatch(property, urlPropertyPattern)))
             {
-                if (Regex.IsMatch(property, urlPropertyPattern))
-                {
-                    return HtmlDecodeUrl(value);
-                }
+                return HtmlDecodeUrl(value);
             }
 
-            return value;
+            return HttpUtility.HtmlDecode(value);
         }
 
         /// <summary>
@@ -686,7 +779,7 @@
             {
                 foreach (var required in ns.RequiredElements)
                 {
-                    if (!result.Metadata.ContainsKey(string.Concat(ns.Prefix, ":", required)))
+                    if (!result.Metadata.OpenGraph.ContainsKey(string.Concat(ns.Prefix, ":", required)))
                     {
                         throw new InvalidSpecificationException($"The parsed HTML does not meet the open graph specification, missing element: {required}");
                     }
